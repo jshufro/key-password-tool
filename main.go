@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -8,6 +10,10 @@ import (
 
 	"syscall"
 
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/ethereum/go-ethereum/accounts"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 	eth2ks "github.com/wealdtech/go-eth2-wallet-encryptor-keystorev4"
 	"golang.org/x/term"
@@ -35,20 +41,13 @@ func main() {
 	cmd := os.Args[:1]
 	args := os.Args[1:]
 
-	if len(args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: %s [input key file path] [output key file path]\n", cmd[0])
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "Usage: %s [input key file path]\n", cmd[0])
 		os.Exit(1)
 		return
 	}
 
 	in := args[0]
-	out := args[1]
-
-	if in == out {
-		fmt.Fprintln(os.Stderr, "Output file path must be different from input file path.")
-		os.Exit(1)
-		return
-	}
 
 	stat, err := os.Stat(in)
 
@@ -77,15 +76,6 @@ func main() {
 		return
 	}
 
-	outFile, err := os.Create(out)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating output file: %v\n", err)
-		os.Exit(1)
-		return
-	}
-
-	defer outFile.Close()
-
 	original := Keystore{}
 	err = json.Unmarshal(originalFile, &original)
 	if err != nil {
@@ -111,7 +101,7 @@ func main() {
 
 	fmt.Printf("Loaded keystore for %s\n", original.Pubkey)
 
-	password, err := hiddenPrompt("Enter your old password")
+	password, err := hiddenPrompt("Enter your keystore password")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -134,47 +124,44 @@ func main() {
 
 	fmt.Println("Password correct.")
 
-	newPass, err := hiddenPrompt("Enter a new password")
+	mk, err := hdkeychain.NewMaster(decrypted, &chaincfg.MainNetParams)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Could not create wallet master key: %w", err)
 		os.Exit(1)
 		return
 	}
 
-	confPass, err := hiddenPrompt("Enter new password again to confirm")
+	path, err := accounts.ParseDerivationPath("m/44'/60'/0'/0/0")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Could not parse derivation path: %w", err)
 		os.Exit(1)
 		return
 	}
 
-	if confPass != newPass {
-		fmt.Fprintln(os.Stderr, "Password mismatch.")
-		os.Exit(1)
-		return
+	key := mk
+	for _, n := range path {
+		// goerli
+		//key, err = key.DeriveNonStandard(n)
+		// Mainnet etc
+		key, err = key.Derive(n)
+
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error Deriving path: %w\n", err)
+			os.Exit(1)
+			return
+		}
 	}
 
-	encrypted, err := crypt.Encrypt(decrypted, newPass)
+	privKey, err := key.ECPrivKey()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error encrypting new file: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Could not get ECPrivKey: %w", err)
 		os.Exit(1)
 		return
 	}
-
-	original.Crypto = encrypted
-	outJSON, err := json.Marshal(original)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error serializing new file json: %v\n", err)
-		os.Exit(1)
-		return
-	}
-
-	_, err = outFile.Write(outJSON)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing new file: %v\n", err)
-		os.Exit(1)
-		return
-	}
-
-	fmt.Printf("Wrote new file %s\n", out)
+	ecdsaPrivKey := privKey.ToECDSA()
+	pubKey := ecdsaPrivKey.Public()
+	pubKeyEcdsa, _ := pubKey.(*ecdsa.PublicKey)
+	fmt.Printf("Private Key at index 0: %s\n", hex.EncodeToString(privKey.Serialize()))
+	fmt.Printf("Public Key at index 0: %v\n", crypto.PubkeyToAddress(*pubKeyEcdsa))
+	return
 }
